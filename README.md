@@ -2,6 +2,8 @@
 ### Association Rule Mining and Inventory Analytics Platform
 **Course Project: Big Data Tools and Techniques**
 
+[![Deploy with Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/deploy?repository=kumararama18170307-del/Supply-Chain-Association-Mining&branch=main&mainModule=app.py)
+
 ---
 
 ## 🌟 Executive Overview
