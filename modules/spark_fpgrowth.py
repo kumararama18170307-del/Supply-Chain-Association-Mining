@@ -492,7 +492,8 @@ def get_fptree_structural_stats(
 
     # Format header table preview for table display
     header_records = []
-    for item, (count, ptr) in sorted_freq:
+    for item, count in sorted_freq:
+        ptr = header_table[item][1]
         node_links_count = 0
         p = ptr
         while p is not None:

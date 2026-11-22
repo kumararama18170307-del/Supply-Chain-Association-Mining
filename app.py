@@ -731,7 +731,11 @@ elif selected_page == "Spark FP-Growth":
             index=0 if "Instant" in st.session_state.spark_engine_choice else 1,
             horizontal=True
         )
-        st.session_state.spark_engine_choice = engine_choice
+        if engine_choice != st.session_state.get("spark_engine_choice"):
+            st.session_state.spark_engine_choice = engine_choice
+            st.session_state.spark_computed = False
+            st.rerun()
+
     with e_col2:
         st.write("")
         st.write("")
@@ -749,6 +753,9 @@ elif selected_page == "Spark FP-Growth":
     col_s2.metric("FP-Growth Runtime", f"{sm.get('execution_time_sec', 0):.4f} sec")
     col_s3.metric("Frequent Itemsets", f"{len(st.session_state.spark_itemsets)}")
     col_s4.metric("Rules Mined", f"{len(st.session_state.spark_rules)}")
+
+    if sm.get("pyspark_diagnostic"):
+        st.info(f"ℹ️ Engine Note: The platform used the authentic Han et al. (2000) FP-Tree algorithm. PySpark JVM Note: {sm['pyspark_diagnostic']}")
 
     st.markdown("### ⏱️ Performance Benchmark: Apriori vs FP-Growth")
     st.write(
@@ -791,43 +798,46 @@ elif selected_page == "Spark FP-Growth":
             "measuring node sharing, memory compression, and distributed Spark partitioning mechanics."
         )
         
-        fptree_stats = get_fptree_structural_stats(
-            transactions_list=st.session_state.transactions_list,
-            min_support=st.session_state.min_support
-        )
-        
-        if "error" not in fptree_stats:
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Raw Transaction Items", f"{fptree_stats.get('total_raw_item_tokens', 0):,}")
-            k2.metric("FP-Tree Total Nodes", f"{fptree_stats.get('fp_tree_total_nodes', 0):,}")
-            k3.metric("Prefix Compression Ratio", f"{fptree_stats.get('compression_ratio_pct', 0):.1f}%")
-            k4.metric("Max Tree Depth", f"{fptree_stats.get('max_tree_depth', 0)}")
+        try:
+            fptree_stats = get_fptree_structural_stats(
+                transactions_list=st.session_state.transactions_list,
+                min_support=st.session_state.min_support
+            )
             
-            st.plotly_chart(plot_fptree_compression(fptree_stats), use_container_width=True)
-            
-            c_left, c_right = st.columns(2)
-            with c_left:
-                st.markdown("#### FP-Tree Header Table (Item Support & Pointers):")
-                st.dataframe(fptree_stats.get("header_table_df", pd.DataFrame()).head(12), use_container_width=True)
-            with c_right:
-                sample_item = fptree_stats.get("sample_item_cpb_target", "Item")
-                st.markdown(f"#### Conditional Pattern Base for `{sample_item}`:")
-                cpb_list = fptree_stats.get("sample_cpb_paths", [])
-                if cpb_list:
-                    st.dataframe(pd.DataFrame(cpb_list), use_container_width=True)
-                else:
-                    st.info(f"No non-root prefix paths for {sample_item}.")
+            if "error" not in fptree_stats:
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Raw Transaction Items", f"{fptree_stats.get('total_raw_item_tokens', 0):,}")
+                k2.metric("FP-Tree Total Nodes", f"{fptree_stats.get('fp_tree_total_nodes', 0):,}")
+                k3.metric("Prefix Compression Ratio", f"{fptree_stats.get('compression_ratio_pct', 0):.1f}%")
+                k4.metric("Max Tree Depth", f"{fptree_stats.get('max_tree_depth', 0)}")
+                
+                st.plotly_chart(plot_fptree_compression(fptree_stats), use_container_width=True)
+                
+                c_left, c_right = st.columns(2)
+                with c_left:
+                    st.markdown("#### FP-Tree Header Table (Item Support & Pointers):")
+                    st.dataframe(fptree_stats.get("header_table_df", pd.DataFrame()).head(12), use_container_width=True)
+                with c_right:
+                    sample_item = fptree_stats.get("sample_item_cpb_target", "Item")
+                    st.markdown(f"#### Conditional Pattern Base for `{sample_item}`:")
+                    cpb_list = fptree_stats.get("sample_cpb_paths", [])
+                    if cpb_list:
+                        st.dataframe(pd.DataFrame(cpb_list), use_container_width=True)
+                    else:
+                        st.info(f"No non-root prefix paths for {sample_item}.")
 
-            with st.expander("⚡ How Apache Spark Distributes FP-Growth Across Partitions", expanded=True):
-                spark_meta = fptree_stats.get("spark_partition_strategy", {})
-                st.markdown(f"""
-                - **Distributed Pass 1 (Global Support):** `df.select(explode(items))` $\\to$ Spark computes global 1-itemset frequencies via `reduceByKey` across partitions ({spark_meta.get('partitions', 4)} partitions).
-                - **Distributed Pass 2 (Partition Routing):** Transactions are filtered to frequent items, sorted in descending frequency order, and routed to worker executors.
-                - **Candidate-Free Tree Mining:** Each worker builds a local prefix tree and mines conditional pattern bases using recursive divide-and-conquer. Unlike Apriori, there is **zero inter-node shuffling during the tree mining phase**.
-                - **Memory Efficiency:** Avoids driver Out-Of-Memory (OOM) failures by never generating $O(M^k)$ candidate sets.
-                """)
-        else:
-            st.warning("Could not build FP-Tree statistics for empty transaction list.")
+                with st.expander("⚡ How Apache Spark Distributes FP-Growth Across Partitions", expanded=True):
+                    spark_meta = fptree_stats.get("spark_partition_strategy", {})
+                    st.markdown(f"""
+                    - **Distributed Pass 1 (Global Support):** `df.select(explode(items))` $\\to$ Spark computes global 1-itemset frequencies via `reduceByKey` across partitions ({spark_meta.get('partitions', 4)} partitions).
+                    - **Distributed Pass 2 (Partition Routing):** Transactions are filtered to frequent items, sorted in descending frequency order, and routed to worker executors.
+                    - **Candidate-Free Tree Mining:** Each worker builds a local prefix tree and mines conditional pattern bases using recursive divide-and-conquer. Unlike Apriori, there is **zero inter-node shuffling during the tree mining phase**.
+                    - **Memory Efficiency:** Avoids driver Out-Of-Memory (OOM) failures by never generating $O(M^k)$ candidate sets.
+                    """)
+            else:
+                st.warning("Could not build FP-Tree statistics for empty transaction list.")
+        except Exception as tree_err:
+            st.error(f"Error computing FP-Tree structural statistics: {str(tree_err)}")
 
 
 # ==========================================
