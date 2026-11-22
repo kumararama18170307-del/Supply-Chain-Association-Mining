@@ -27,6 +27,7 @@ Supply-Chain-Association-Mining/
 │   ├── apriori_mining.py          # MLxtend Apriori engine & first-principles audit
 │   ├── association_rules.py       # Rule filtering, display formatting, CSV export
 │   ├── spark_fpgrowth.py          # PySpark MLlib FP-Growth engine with parity fallback
+│   ├── accuracy_analysis.py       # Model accuracy, generalization & precision/recall
 │   └── recommendations.py         # Inventory, slotting & procurement strategy engine
 ├── visualizations/
 │   └── charts.py                  # High-performance Plotly visual analytics suite
@@ -104,29 +105,38 @@ python -m streamlit run app.py
 
 ---
 
-## 🖥️ Platform Navigation (The Eight Pages)
+## 🖥️ Platform Navigation (The Nine Pages)
 
 1. **Dashboard:** Runtime KPI metrics (Transactions, Unique SKUs, Suppliers, Warehouses, Frequent Itemsets, Strong Rules) and high-level charts.
 2. **Dataset Management:** Upload custom CSV files, download canonical sample datasets, trigger synthetic data generation, and inspect schema validation with duplicate handling.
 3. **Data Preprocessing:** Grouping by `Order_ID`, basket size distribution metrics, and interactive preview of the high-dimensional boolean basket matrix.
-4. **Apriori Analysis:** MLxtend execution, support/confidence/lift parameter sliders, frequent itemsets table, and association rules with conviction and leverage metrics.
-5. **Spark FP-Growth:** PySpark MLlib execution, runtime timing comparison against Apriori on identical inputs, and FP-tree pattern inspection.
+4. **Apriori Analysis:** MLxtend execution, support/confidence/lift parameter sliders, frequent itemsets table, association rules, and the **Candidate Generation Levels ($C_k \to L_k$)** view.
+5. **Spark FP-Growth:** PySpark MLlib execution, runtime timing comparison against Apriori on identical inputs, and the **FP-Tree Structural Stats & Spark Partitioning** view.
 6. **Association Rules:** Browsable, sortable, filterable rules table with CSV export, interactive Product Association Network Graph, and the **Academic Mathematical Verification Audit**.
-7. **Supply Chain Insights:** Concrete operational recommendations categorized into Inventory Buffering, Warehouse Slotting, and Vendor Synchronization, with strict labeling between `[Statistical finding]` and `[Business recommendation]`.
-8. **Reports:** Dynamic written analytical executive summary, inventory risk roadmap, and one-click downloads for Cleaned Data, Itemsets, Rules, and Text Summary.
+7. **Accuracy Analysis:** Train/test split evaluation, out-of-sample confidence drift, rule generalization health rate, basket-level predictive precision & recall, and hyperparameter threshold sensitivity curves.
+8. **Supply Chain Insights:** Concrete operational recommendations categorized into Inventory Buffering, Warehouse Slotting, and Vendor Synchronization, with strict labeling between `[Statistical finding]` and `[Business recommendation]`.
+9. **Reports:** Dynamic written analytical executive summary, inventory risk roadmap, and one-click downloads for Cleaned Data, Itemsets, Rules, and Text Summary.
 
 ---
 
 ## 👨‍🏫 University Faculty Demonstration Script
 
 ### Walkthrough Sequence:
-1. **Show Dashboard (Page 1):** Point out the 6 real-time KPI cards. Mention that these are dynamically computed from the loaded dataset (e.g., 5,500 records across 1,200+ distinct transactions).
+1. **Show Dashboard (Page 1):** Point out the 6 real-time KPI cards. Mention that these are dynamically computed from the loaded dataset (5,500 records across 1,441 distinct transactions).
 2. **Show Dataset Management (Page 2):** Point out the Schema Validation and Data Cleaning Audit. Highlight that missing values and duplicate line items within the same order are scrubbed with zero risk of application crash.
-3. **Show Data Preprocessing (Page 3):** Point out the One-Hot Encoded Boolean Basket Matrix. Explain that rows represent $N$ transactions and columns represent $M$ products with calculated matrix sparsity.
-4. **Show Apriori Analysis (Page 4):** Adjust the Minimum Support slider to 0.05 and Confidence to 0.40. Explain the Downward-Closure property and how candidate itemsets are pruned level-by-level.
-5. **Show Spark FP-Growth (Page 5):** Point to the **Runtime Performance Comparison chart**. Explain that FP-Growth avoids candidate generation by constructing the FP-Tree, making it faster and horizontally scalable on Apache Spark clusters.
+3. **Show Data Preprocessing (Page 3):** Point out the One-Hot Encoded Boolean Basket Matrix. Explain that rows represent $N$ transactions and columns represent $M$ products with calculated matrix sparsity (90.96%).
+4. **Show Apriori Analysis (Page 4):**
+   - Adjust the Minimum Support slider to 0.05 and Confidence to 0.40.
+   - Switch to the **Candidate Generation Levels tab**: show examiners the exact count of candidates generated at Level 1, 2, and 3, and explain how the Downward-Closure property prunes combinations before reading transactions.
+5. **Show Spark FP-Growth (Page 5):**
+   - Point to the **Runtime Performance Comparison chart**. Explain that FP-Growth avoids candidate generation entirely by constructing an FP-Tree.
+   - Switch to the **FP-Tree Structure tab**: show the FP-Tree prefix compression ratio (~74% memory savings) and explain how PySpark MLlib partitions transactions across workers to scale without driver memory bottlenecks.
 6. **Show Association Rules & Audit (Page 6):**
    - Point out the **Interactive Product Association Network Graph**.
    - Scroll to the **Academic Mathematical Verification Audit** table: show that the manually recomputed Support, Confidence, and Lift from first principles match the algorithmic outputs with 100% exact match (`PASS`).
-7. **Show Supply Chain Insights (Page 7):** Show an insight card (e.g., Laptop $\to$ Mouse / Stand). Emphasize the distinct separation between the empirical `[Statistical finding]` and the actionable `[Business recommendation]`.
-8. **Show Reports (Page 8):** Demonstrate the dynamically generated Analytical Executive Summary and click **Export Filtered Rules to CSV**.
+7. **Show Accuracy Analysis (Page 7):**
+   - Show the 80/20 train/test split. Point to the **Generalization Health Rate** (>85%) and the **Train vs Test Confidence Scatter Plot** along the diagonal parity line.
+   - Show the **Basket Predictive Accuracy** metrics (Macro Precision ~75%, Recall, F1).
+   - Show the **Hyperparameter Threshold Sensitivity Curves** demonstrating how rule quality and coverage trade off across support and confidence values.
+8. **Show Supply Chain Insights (Page 8):** Show an insight card (e.g., Laptop $\to$ Wireless Mouse). Emphasize the distinct separation between the empirical `[Statistical finding]` and the actionable `[Business recommendation]`.
+9. **Show Reports (Page 9):** Demonstrate the dynamically generated Analytical Executive Summary and click **Export Filtered Rules to CSV**.

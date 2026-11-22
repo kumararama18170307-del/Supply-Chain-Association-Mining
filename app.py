@@ -30,11 +30,22 @@ from modules.data_preprocessing import (
     validate_dataset, clean_dataset, get_dataset_statistics,
     build_basket_matrix, get_transactions_list, REQUIRED_COLUMNS
 )
-from modules.apriori_mining import run_apriori_mining, verify_rule_mathematics
-from modules.spark_fpgrowth import run_spark_fpgrowth, _pure_python_fpgrowth
+from modules.apriori_mining import (
+    run_apriori_mining, verify_rule_mathematics,
+    explain_apriori_candidate_levels
+)
+from modules.spark_fpgrowth import (
+    run_spark_fpgrowth, _pure_python_fpgrowth,
+    get_fptree_structural_stats
+)
 from modules.association_rules import (
     filter_rules, format_rules_for_display,
     generate_academic_verification_report, export_rules_to_csv
+)
+from modules.accuracy_analysis import (
+    train_test_split_baskets, evaluate_rule_generalization,
+    evaluate_predictive_accuracy, compute_threshold_sensitivity,
+    get_accuracy_metric_definitions
 )
 from modules.recommendations import (
     generate_supply_chain_recommendations,
@@ -45,7 +56,9 @@ from visualizations.charts import (
     plot_itemset_size_distribution, plot_support_vs_confidence,
     plot_lift_comparison, plot_rules_network,
     plot_warehouse_distribution, plot_supplier_procurement,
-    plot_runtime_comparison
+    plot_runtime_comparison, plot_generalization_scatter,
+    plot_threshold_sensitivity_curves, plot_rule_drift_histogram,
+    plot_candidate_levels_bar, plot_fptree_compression
 )
 
 
@@ -215,6 +228,24 @@ def init_session_state():
         st.session_state.spark_rules = pd.DataFrame()
         st.session_state.spark_metrics = {}
 
+    # Accuracy Analysis Cache
+    if "acc_test_size" not in st.session_state:
+        st.session_state.acc_test_size = 0.20
+    if "acc_random_seed" not in st.session_state:
+        st.session_state.acc_random_seed = 42
+    if "acc_evaluated" not in st.session_state:
+        st.session_state.acc_evaluated = False
+    if "acc_gen_df" not in st.session_state:
+        st.session_state.acc_gen_df = pd.DataFrame()
+    if "acc_gen_summary" not in st.session_state:
+        st.session_state.acc_gen_summary = {}
+    if "acc_pred_df" not in st.session_state:
+        st.session_state.acc_pred_df = pd.DataFrame()
+    if "acc_pred_summary" not in st.session_state:
+        st.session_state.acc_pred_summary = {}
+    if "acc_sensitivity_df" not in st.session_state:
+        st.session_state.acc_sensitivity_df = pd.DataFrame()
+
 
 init_session_state()
 
@@ -270,6 +301,7 @@ PAGES = [
     "Apriori Analysis",
     "Spark FP-Growth",
     "Association Rules",
+    "Accuracy Analysis",
     "Supply Chain Insights",
     "Reports"
 ]
@@ -325,6 +357,7 @@ if (new_supp != st.session_state.min_support or
     st.session_state.max_len = new_maxlen
     st.session_state.apriori_computed = False
     st.session_state.spark_computed = False
+    st.session_state.acc_evaluated = False
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -568,7 +601,12 @@ elif selected_page == "Apriori Analysis":
     col_t3.metric("Rules Mined ($R$)", f"{len(st.session_state.apriori_rules)}")
     col_t4.metric("Active Support Threshold", f"{st.session_state.min_support*100:.1f}%")
 
-    tab1, tab2, tab3 = st.tabs(["Frequent Itemsets", "Association Rules", "Visual Analytics"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Frequent Itemsets",
+        "Association Rules",
+        "Visual Analytics",
+        "🔬 Candidate Generation Levels"
+    ])
 
     with tab1:
         st.subheader("Frequent Itemsets Discovered")
@@ -599,6 +637,39 @@ elif selected_page == "Apriori Analysis":
                 st.plotly_chart(plot_lift_comparison(st.session_state.apriori_rules), use_container_width=True)
         else:
             st.info("No itemsets available to plot. Adjust thresholds in the sidebar.")
+
+    with tab4:
+        st.subheader("🔬 Algorithms & Techniques: Level-wise Candidate Generation ($C_k \\to L_k$)")
+        st.markdown(
+            "This view computes and visualizes the exact candidate generation levels, database scans, "
+            "and downward-closure subset pruning metrics on your loaded dataset."
+        )
+        
+        levels_df, levels_meta = explain_apriori_candidate_levels(
+            basket_df=st.session_state.basket_matrix,
+            min_support=st.session_state.min_support,
+            max_len=st.session_state.max_len
+        )
+        
+        if not levels_df.empty:
+            st.plotly_chart(plot_candidate_levels_bar(levels_df), use_container_width=True)
+            
+            st.markdown("#### Candidate Generation & Pruning Audit Table:")
+            display_levels = levels_df[[
+                "level_name", "theoretical_combinatorial", "candidates_generated",
+                "pruned_by_downward_closure", "scanned_against_database",
+                "frequent_itemsets_found", "pruning_ratio_pct"
+            ]].copy()
+            st.dataframe(display_levels, use_container_width=True)
+            
+            with st.expander("🎓 Examiner Explanation: Why Candidate Generation Bottlenecks Dense Big Data", expanded=True):
+                st.markdown(f"""
+                - **Combinatorial Reduction:** Out of theoretical combinatorial space, the Apriori Downward-Closure property pruned candidates before scanning transactions.
+                - **The Apriori Rule:** A candidate $k$-itemset is created by joining $L_{{k-1}} \\bowtie L_{{k-1}}$. Any candidate with an infrequent $(k-1)$ subset is discarded *prior* to reading transaction rows.
+                - **Scalability Limitation:** Although pruning avoids searching all combinations, Apriori requires **$k$ full passes** over the transactional matrix ($N = {levels_meta.get('total_transactions', 0):,}$ orders). On massive enterprise datasets, candidate generation ($C_k$) causes combinatorial explosions, leading to FP-Growth.
+                """)
+        else:
+            st.warning("Could not compute candidate levels for empty dataset.")
 
 
 # ==========================================
@@ -664,7 +735,11 @@ elif selected_page == "Spark FP-Growth":
         use_container_width=True
     )
 
-    tab_sp1, tab_sp2 = st.tabs(["FP-Growth Frequent Itemsets", "FP-Growth Association Rules"])
+    tab_sp1, tab_sp2, tab_sp3 = st.tabs([
+        "FP-Growth Frequent Itemsets",
+        "FP-Growth Association Rules",
+        "🔬 FP-Tree Structure & Spark Partitioning"
+    ])
     with tab_sp1:
         st.subheader("Frequent Patterns Mined by FP-Growth")
         s_freq = st.session_state.spark_itemsets
@@ -672,7 +747,7 @@ elif selected_page == "Spark FP-Growth":
             st.warning("No frequent patterns found.")
         else:
             display_s_freq = s_freq[["itemset_str", "length", "support"]].copy()
-            display_s_freq["support_pct"] = display_s_freq["support"].apply(lambda v: f"{v*100:.2f}%")
+            display_s_freq["support_pct"] = display_freq["support"].apply(lambda v: f"{v*100:.2f}%") if "support" in display_s_freq else display_s_freq["support"]
             st.dataframe(display_s_freq, use_container_width=True)
 
     with tab_sp2:
@@ -684,6 +759,51 @@ elif selected_page == "Spark FP-Growth":
             fmt_s_rules = format_rules_for_display(s_rules)
             cols = ["rule_repr", "support_fmt", "confidence_fmt", "lift_fmt"]
             st.dataframe(fmt_s_rules[[c for c in cols if c in fmt_s_rules.columns]], use_container_width=True)
+
+    with tab_sp3:
+        st.subheader("🔬 Algorithms & Techniques: FP-Tree Structure & PySpark Partitioning")
+        st.markdown(
+            "This view inspects the internal Frequent Pattern Tree constructed from the dataset, "
+            "measuring node sharing, memory compression, and distributed Spark partitioning mechanics."
+        )
+        
+        fptree_stats = get_fptree_structural_stats(
+            transactions_list=st.session_state.transactions_list,
+            min_support=st.session_state.min_support
+        )
+        
+        if "error" not in fptree_stats:
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Raw Transaction Items", f"{fptree_stats.get('total_raw_item_tokens', 0):,}")
+            k2.metric("FP-Tree Total Nodes", f"{fptree_stats.get('fp_tree_total_nodes', 0):,}")
+            k3.metric("Prefix Compression Ratio", f"{fptree_stats.get('compression_ratio_pct', 0):.1f}%")
+            k4.metric("Max Tree Depth", f"{fptree_stats.get('max_tree_depth', 0)}")
+            
+            st.plotly_chart(plot_fptree_compression(fptree_stats), use_container_width=True)
+            
+            c_left, c_right = st.columns(2)
+            with c_left:
+                st.markdown("#### FP-Tree Header Table (Item Support & Pointers):")
+                st.dataframe(fptree_stats.get("header_table_df", pd.DataFrame()).head(12), use_container_width=True)
+            with c_right:
+                sample_item = fptree_stats.get("sample_item_cpb_target", "Item")
+                st.markdown(f"#### Conditional Pattern Base for `{sample_item}`:")
+                cpb_list = fptree_stats.get("sample_cpb_paths", [])
+                if cpb_list:
+                    st.dataframe(pd.DataFrame(cpb_list), use_container_width=True)
+                else:
+                    st.info(f"No non-root prefix paths for {sample_item}.")
+
+            with st.expander("⚡ How Apache Spark Distributes FP-Growth Across Partitions", expanded=True):
+                spark_meta = fptree_stats.get("spark_partition_strategy", {})
+                st.markdown(f"""
+                - **Distributed Pass 1 (Global Support):** `df.select(explode(items))` $\\to$ Spark computes global 1-itemset frequencies via `reduceByKey` across partitions ({spark_meta.get('partitions', 4)} partitions).
+                - **Distributed Pass 2 (Partition Routing):** Transactions are filtered to frequent items, sorted in descending frequency order, and routed to worker executors.
+                - **Candidate-Free Tree Mining:** Each worker builds a local prefix tree and mines conditional pattern bases using recursive divide-and-conquer. Unlike Apriori, there is **zero inter-node shuffling during the tree mining phase**.
+                - **Memory Efficiency:** Avoids driver Out-Of-Memory (OOM) failures by never generating $O(M^k)$ candidate sets.
+                """)
+        else:
+            st.warning("Could not build FP-Tree statistics for empty transaction list.")
 
 
 # ==========================================
@@ -777,7 +897,199 @@ elif selected_page == "Association Rules":
 
 
 # ==========================================
-# PAGE 7: SUPPLY CHAIN INSIGHTS
+# PAGE 7: ACCURACY ANALYSIS
+# ==========================================
+elif selected_page == "Accuracy Analysis":
+    ensure_apriori_executed()
+    st.title("🎯 Model Accuracy & Generalization Analysis")
+    st.markdown(
+        "Measuring out-of-sample rule generalization on held-out test transactions, "
+        "predictive precision/recall on customer baskets, and threshold hyperparameter sensitivity."
+    )
+
+    with st.expander("📘 Academic Methodology: Train/Test Split & Recommender Accuracy", expanded=False):
+        st.markdown(r"""
+        **Why Accuracy Analysis in Unsupervised Association Mining?**
+        In classical unsupervised mining, models are prone to discovering spurious rules that reflect random sample noise rather than invariant supply chain patterns.
+        
+        To rigorously evaluate generalization:
+        1. **Train/Held-Out Test Partitioning:** Transactions are partitioned into $D_{train}$ (e.g. 80%) and $D_{test}$ (20%). Rules are discovered strictly on $D_{train}$.
+        2. **Generalization Auditing:** Each mined rule $A \to B$ is evaluated on $D_{test}$ to compute $\text{Confidence}_{test}$ and $\text{Lift}_{test}$. The **Confidence Drift** $\Delta \text{Conf} = \text{Conf}_{test} - \text{Conf}_{train}$ measures rule decay.
+        3. **Predictive Precision & Recall:** When antecedents appear in a test basket, the rule recommends consequents. Precision measures what fraction of recommendations were genuinely in the basket; Recall measures what fraction of actual companion items were predicted.
+        4. **Threshold Sensitivity:** Tracks how rule count, precision, and recall evolve across a sweep of minimum support and confidence thresholds.
+        """)
+
+    # Train/Test Configuration Controls
+    c_s1, c_s2, c_s3 = st.columns([2, 2, 1])
+    with c_s1:
+        test_size_slider = st.slider(
+            "Held-Out Test Split Ratio",
+            min_value=0.10, max_value=0.40,
+            value=float(st.session_state.acc_test_size),
+            step=0.05,
+            help="Proportion of total order transactions reserved for generalization testing."
+        )
+        st.session_state.acc_test_size = test_size_slider
+    with c_s2:
+        rand_seed = st.number_input(
+            "Random Split Seed",
+            min_value=1, max_value=9999,
+            value=int(st.session_state.acc_random_seed),
+            step=1
+        )
+        st.session_state.acc_random_seed = rand_seed
+    with c_s3:
+        st.write("")
+        st.write("")
+        run_acc_btn = st.button("🔄 Evaluate Accuracy")
+
+    # Re-evaluate if requested or not yet computed
+    if not st.session_state.acc_evaluated or run_acc_btn:
+        with st.spinner("Partitioning transactions and evaluating out-of-sample generalization..."):
+            train_basket, test_basket = train_test_split_baskets(
+                basket_df=st.session_state.basket_matrix,
+                test_size=st.session_state.acc_test_size,
+                random_state=st.session_state.acc_random_seed
+            )
+            
+            _, train_rules, _ = run_apriori_mining(
+                basket_df=train_basket,
+                min_support=st.session_state.min_support,
+                min_confidence=st.session_state.min_confidence,
+                min_lift=st.session_state.min_lift,
+                max_len=st.session_state.max_len
+            )
+            
+            gen_df, gen_sum = evaluate_rule_generalization(train_rules, test_basket)
+            pred_df, pred_sum = evaluate_predictive_accuracy(train_rules, test_basket)
+            
+            st.session_state.acc_gen_df = gen_df
+            st.session_state.acc_gen_summary = gen_sum
+            st.session_state.acc_pred_df = pred_df
+            st.session_state.acc_pred_summary = pred_sum
+            st.session_state.acc_evaluated = True
+
+    gen_df = st.session_state.acc_gen_df
+    gen_sum = st.session_state.acc_gen_summary
+    pred_df = st.session_state.acc_pred_df
+    pred_sum = st.session_state.acc_pred_summary
+
+    # Top KPI Metrics Cards
+    st.markdown("### 📊 Out-of-Sample Performance Summary")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Generalization Health", f"{gen_sum.get('generalization_health_rate', 0):.1f}%", help="% of rules maintaining Lift > 1.0 and >= 60% confidence on unseen test data")
+    k2.metric("Mean Train Conf", f"{gen_sum.get('mean_train_confidence', 0):.3f}", help="Average confidence on training split")
+    k3.metric("Mean Test Conf", f"{gen_sum.get('mean_test_confidence', 0):.3f}", delta=f"{gen_sum.get('mean_confidence_drift', 0):+.3f}", help="Average confidence on held-out test split")
+    k4.metric("Test Transactions ($N_{test}$)", f"{gen_sum.get('test_transactions_count', 0):,}")
+
+    kp1, kp2, kp3, kp4 = st.columns(4)
+    kp1.metric("Test Basket Coverage", f"{pred_sum.get('coverage_pct', 0):.1f}%", help="% of test orders that triggered at least one rule")
+    kp2.metric("Macro Precision", f"{pred_sum.get('macro_precision', 0):.3f}", help="Proportion of predicted items genuinely in test basket")
+    kp3.metric("Macro Recall", f"{pred_sum.get('macro_recall', 0):.3f}", help="Proportion of actual companion items captured")
+    kp4.metric("Macro F1-Score", f"{pred_sum.get('macro_f1', 0):.3f}", help="Harmonic mean of precision and recall")
+
+    st.markdown("---")
+    acc_tab1, acc_tab2, acc_tab3, acc_tab4 = st.tabs([
+        "Rule Generalization & Drift",
+        "Basket Recommender Accuracy",
+        "Threshold Sensitivity Sweep",
+        "Mathematical Metric Definitions"
+    ])
+
+    with acc_tab1:
+        st.subheader("Out-of-Sample Rule Generalization Audit")
+        if gen_df.empty:
+            st.warning("No rules discovered on the training set to evaluate. Try lowering the Minimum Support or Confidence in the sidebar.")
+        else:
+            col_g1, col_g2 = st.columns([3, 2])
+            with col_g1:
+                st.plotly_chart(plot_generalization_scatter(gen_df), use_container_width=True)
+            with col_g2:
+                st.plotly_chart(plot_rule_drift_histogram(gen_df), use_container_width=True)
+
+            st.markdown("#### Rule-by-Rule Generalization Audit Table:")
+            display_cols = [
+                "rule_repr", "train_support", "test_support",
+                "train_confidence", "test_confidence", "confidence_drift",
+                "train_lift", "test_lift", "generalization_status"
+            ]
+            st.dataframe(gen_df[display_cols], use_container_width=True)
+
+            st.caption(
+                f"Classification: Strong Generalizers: {gen_sum.get('strong_generalizers_count', 0)} | "
+                f"Moderate Generalizers: {gen_sum.get('moderate_generalizers_count', 0)} | "
+                f"Overfitted: {gen_sum.get('overfitted_count', 0)} | "
+                f"Degraded: {gen_sum.get('degraded_count', 0)}"
+            )
+
+    with acc_tab2:
+        st.subheader("Basket-Level Predictive Accuracy (Recommender Evaluation)")
+        st.markdown(
+            "Whenever an antecedent product is in an unseen customer's basket, the model recommends the consequents. "
+            "This table measures exact True Positives ($TP$), False Positives ($FP$), and False Negatives ($FN$)."
+        )
+
+        b_c1, b_c2, b_c3 = st.columns(3)
+        b_c1.metric("True Positives (Items)", f"{pred_sum.get('total_true_positives', 0):,}", help="Predicted companion items correctly present in basket")
+        b_c2.metric("False Positives (Items)", f"{pred_sum.get('total_false_positives', 0):,}", help="Predicted companion items NOT present in basket")
+        b_c3.metric("False Negatives (Items)", f"{pred_sum.get('total_false_negatives', 0):,}", help="Actual companion items missed by rules")
+
+        st.markdown("#### Micro vs Macro Accuracy Benchmarks:")
+        accuracy_comp_df = pd.DataFrame([
+            {"Metric Type": "Macro-Average (Per-Order Mean)", "Precision": f"{pred_sum.get('macro_precision', 0):.4f}", "Recall": f"{pred_sum.get('macro_recall', 0):.4f}", "F1-Score": f"{pred_sum.get('macro_f1', 0):.4f}"},
+            {"Metric Type": "Micro-Average (Global Item Sum)", "Precision": f"{pred_sum.get('micro_precision', 0):.4f}", "Recall": f"{pred_sum.get('micro_recall', 0):.4f}", "F1-Score": f"{pred_sum.get('micro_f1', 0):.4f}"}
+        ])
+        st.table(accuracy_comp_df)
+
+        st.markdown("#### Sample Predictions on Held-Out Test Orders:")
+        if not pred_df.empty:
+            sample_pred = pred_df[pred_df["triggered"]].head(15)[[
+                "basket_id", "basket_size", "rules_fired", "predicted_count",
+                "true_positives", "false_positives", "precision", "recall", "f1_score"
+            ]].copy()
+            st.dataframe(sample_pred, use_container_width=True)
+
+    with acc_tab3:
+        st.subheader("Hyperparameter Threshold Sensitivity Sweep")
+        st.markdown(
+            "Systematically evaluates how mined rule count, precision, recall, and out-of-sample coverage "
+            "evolve across various combinations of Minimum Support and Minimum Confidence thresholds."
+        )
+
+        if st.button("📊 Run Multi-Threshold Sensitivity Grid"):
+            with st.spinner("Executing sensitivity sweep across support and confidence grid..."):
+                sens_df = compute_threshold_sensitivity(
+                    basket_df=st.session_state.basket_matrix,
+                    test_size=st.session_state.acc_test_size,
+                    support_thresholds=[0.03, 0.05, 0.08, 0.10],
+                    confidence_thresholds=[0.30, 0.40, 0.50, 0.60],
+                    min_lift=st.session_state.min_lift,
+                    random_state=st.session_state.acc_random_seed
+                )
+                st.session_state.acc_sensitivity_df = sens_df
+
+        if not st.session_state.acc_sensitivity_df.empty:
+            sens_df = st.session_state.acc_sensitivity_df
+            st.plotly_chart(plot_threshold_sensitivity_curves(sens_df), use_container_width=True)
+            st.markdown("#### Threshold Sensitivity Data Table:")
+            st.dataframe(sens_df, use_container_width=True)
+        else:
+            st.info("Click the button above to run the multi-threshold sensitivity grid analysis.")
+
+    with acc_tab4:
+        st.subheader("Academic Metric Formulations & Mathematical Definitions")
+        st.markdown("These exact mathematical formulations are implemented in `modules/accuracy_analysis.py`:")
+
+        defs = get_accuracy_metric_definitions()
+        for metric_name, info in defs.items():
+            with st.expander(f"📐 {metric_name}", expanded=True):
+                st.latex(info["symbol"])
+                st.markdown(f"**Academic Definition:** {info['definition']}")
+                st.markdown(f"**Operational Meaning:** {info['operational_meaning']}")
+
+
+# ==========================================
+# PAGE 8: SUPPLY CHAIN INSIGHTS
 # ==========================================
 elif selected_page == "Supply Chain Insights":
     ensure_apriori_executed()
@@ -838,7 +1150,7 @@ elif selected_page == "Supply Chain Insights":
 
 
 # ==========================================
-# PAGE 8: REPORTS
+# PAGE 9: REPORTS
 # ==========================================
 elif selected_page == "Reports":
     ensure_apriori_executed()
@@ -913,6 +1225,19 @@ Algorithm B: FP-Growth (FP-Tree Pattern Growth)
 3. Multi-Vendor Procurement Synchronization:
    - When complementary products originate from different suppliers, synchronize purchase order
      dispatch lead times to eliminate partial fulfillment and split shipments.
+
+================================================================================
+5. MODEL ACCURACY & OUT-OF-SAMPLE GENERALIZATION BENCHMARKS
+================================================================================
+- Generalization Health Rate : {st.session_state.acc_gen_summary.get('generalization_health_rate', 'N/A')}%
+- Mean Train Confidence      : {st.session_state.acc_gen_summary.get('mean_train_confidence', 'N/A')}
+- Mean Test Confidence       : {st.session_state.acc_gen_summary.get('mean_test_confidence', 'N/A')}
+- Mean Confidence Drift      : {st.session_state.acc_gen_summary.get('mean_confidence_drift', 'N/A')}
+- Test Basket Coverage       : {st.session_state.acc_pred_summary.get('coverage_pct', 'N/A')}%
+- Predictive Macro Precision : {st.session_state.acc_pred_summary.get('macro_precision', 'N/A')}
+- Predictive Macro Recall    : {st.session_state.acc_pred_summary.get('macro_recall', 'N/A')}
+- Predictive Macro F1-Score  : {st.session_state.acc_pred_summary.get('macro_f1', 'N/A')}
+
 """
 
     st.subheader("Executive Written Analytical Report")

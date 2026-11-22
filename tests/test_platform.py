@@ -24,9 +24,17 @@ from modules.data_preprocessing import (
     validate_dataset, clean_dataset, get_dataset_statistics,
     build_basket_matrix, get_transactions_list, REQUIRED_COLUMNS
 )
-from modules.apriori_mining import run_apriori_mining, verify_rule_mathematics
-from modules.spark_fpgrowth import run_spark_fpgrowth
+from modules.apriori_mining import (
+    run_apriori_mining, verify_rule_mathematics,
+    explain_apriori_candidate_levels
+)
+from modules.spark_fpgrowth import run_spark_fpgrowth, get_fptree_structural_stats
 from modules.association_rules import filter_rules, generate_academic_verification_report
+from modules.accuracy_analysis import (
+    train_test_split_baskets, evaluate_rule_generalization,
+    evaluate_predictive_accuracy, compute_threshold_sensitivity,
+    get_accuracy_metric_definitions
+)
 from modules.recommendations import generate_supply_chain_recommendations
 
 
@@ -161,6 +169,102 @@ class TestSupplyChainPlatform(unittest.TestCase):
             self.assertIn("Confidence", r["statistical_finding"])
             self.assertIn("business_recommendation", r)
             self.assertIn(r["priority"], ["High", "Medium", "Standard"])
+
+    def test_08_accuracy_train_test_split(self):
+        """Verify train/test split maintains transaction count, proportions, and determinism."""
+        train_df, test_df = train_test_split_baskets(self.basket_matrix, test_size=0.20, random_state=42)
+        total_n = len(self.basket_matrix)
+        self.assertEqual(len(train_df) + len(test_df), total_n)
+        self.assertAlmostEqual(len(test_df) / total_n, 0.20, places=1)
+        self.assertEqual(list(train_df.columns), list(test_df.columns))
+
+    def test_09_accuracy_generalization_manual_calculation(self):
+        """
+        Verify that out-of-sample test support, confidence, and lift match manual calculation
+        on a known, controlled toy test split.
+        """
+        # Controlled toy test basket matrix (4 orders x 4 items)
+        # Order 1: A, B
+        # Order 2: A, B, C
+        # Order 3: A
+        # Order 4: C, D
+        test_toy = pd.DataFrame([
+            {"A": True,  "B": True,  "C": False, "D": False},
+            {"A": True,  "B": True,  "C": True,  "D": False},
+            {"A": True,  "B": False, "C": False, "D": False},
+            {"A": False, "B": False, "C": True,  "D": True},
+        ])
+        
+        # Simulated train rule: {A} -> {B} (train_conf=0.70, train_lift=1.40, train_supp=0.30)
+        mock_train_rules = pd.DataFrame([{
+            "rule_repr": "{A} -> {B}",
+            "antecedents": ["A"],
+            "consequents": ["B"],
+            "support": 0.30,
+            "confidence": 0.70,
+            "lift": 1.40,
+            "antecedents_str": "A",
+            "consequents_str": "B"
+        }])
+
+        gen_df, gen_sum = evaluate_rule_generalization(mock_train_rules, test_toy)
+        self.assertEqual(len(gen_df), 1)
+        row = gen_df.iloc[0]
+
+        # Manual derivations:
+        # N_test = 4
+        # Count(A) = 3 (Orders 1, 2, 3) -> Supp(A) = 3/4 = 0.75
+        # Count(B) = 2 (Orders 1, 2)    -> Supp(B) = 2/4 = 0.50
+        # Count(A & B) = 2 (Orders 1, 2) -> Supp(A & B) = 2/4 = 0.50
+        # Test Confidence = 0.50 / 0.75 = 2/3 = 0.6667
+        # Test Lift = (2/3) / 0.50 = 4/3 = 1.3333
+        self.assertAlmostEqual(row["test_support"], 0.50, places=4)
+        self.assertAlmostEqual(row["test_confidence"], 2.0 / 3.0, places=4)
+        self.assertAlmostEqual(row["test_lift"], 4.0 / 3.0, places=4)
+        self.assertAlmostEqual(row["confidence_drift"], (2.0 / 3.0) - 0.70, places=4)
+
+    def test_10_accuracy_precision_recall_manual_calculation(self):
+        """
+        Verify that recommender Precision, Recall, and F1-Score match manual calculations
+        on a known, controlled toy test split.
+        """
+        test_toy = pd.DataFrame([
+            {"A": True,  "B": True,  "C": False, "D": False},  # Pred: B -> Target: B -> TP=1, FP=0 -> Prec=1.0, Rec=1.0
+            {"A": True,  "B": True,  "C": True,  "D": False},  # Pred: B -> Target: B, C -> TP=1, FP=0, FN=1 -> Prec=1.0, Rec=0.5
+            {"A": True,  "B": False, "C": False, "D": False},  # Pred: B -> Target: A -> TP=0, FP=1, FN=0 -> Prec=0.0, Rec=0.0
+            {"A": False, "B": False, "C": True,  "D": True},   # Not triggered
+        ])
+
+        mock_train_rules = pd.DataFrame([{
+            "rule_repr": "{A} -> {B}",
+            "antecedents": ["A"],
+            "consequents": ["B"],
+            "support": 0.30,
+            "confidence": 0.70,
+            "lift": 1.40
+        }])
+
+        eval_df, metrics = evaluate_predictive_accuracy(mock_train_rules, test_toy)
+        # Macro Precision across the 3 triggered baskets: (1.0 + 1.0 + 0.0) / 3 = 0.6667
+        self.assertAlmostEqual(metrics["macro_precision"], 2.0 / 3.0, places=3)
+        # Total True Positives = 1 + 1 + 0 = 2
+        self.assertEqual(metrics["total_true_positives"], 2)
+        # Total False Positives = 0 + 0 + 1 = 1
+        self.assertEqual(metrics["total_false_positives"], 1)
+        # Coverage: 3 out of 4 baskets triggered = 75.0%
+        self.assertEqual(metrics["coverage_pct"], 75.0)
+
+    def test_11_candidate_levels_and_fptree_stats(self):
+        """Verify candidate level tracking and FP-Tree structural extraction."""
+        levels_df, meta = explain_apriori_candidate_levels(self.basket_matrix, min_support=0.05, max_len=3)
+        self.assertFalse(levels_df.empty)
+        self.assertIn("candidates_generated", levels_df.columns)
+        self.assertIn("frequent_itemsets_found", levels_df.columns)
+
+        fptree_stats = get_fptree_structural_stats(self.tx_list, min_support=0.05)
+        self.assertIn("compression_ratio_pct", fptree_stats)
+        self.assertGreater(fptree_stats["compression_ratio_pct"], 0.0)
+        self.assertIn("fp_tree_total_nodes", fptree_stats)
 
 
 if __name__ == "__main__":

@@ -407,3 +407,119 @@ def _pure_python_fpgrowth(
     }
 
     return df_freq, df_rules, metrics
+
+
+def get_fptree_structural_stats(
+    transactions_list: List[List[str]],
+    min_support: float = 0.05
+) -> Dict[str, Any]:
+    """
+    Computes structural FP-Tree statistics, compression ratios, and conditional pattern bases
+    directly from loaded transactional data for academic presentation and examiner explanation.
+    """
+    N = len(transactions_list)
+    if N == 0:
+        return {"error": "Empty transaction list"}
+        
+    total_raw_item_tokens = sum(len(tx) for tx in transactions_list)
+    min_count = max(1, int(np.ceil(min_support * N)))
+    
+    # Count frequencies
+    item_counts = {}
+    for tx in transactions_list:
+        for item in tx:
+            item_counts[item] = item_counts.get(item, 0) + 1
+            
+    # Filter by minimum support
+    freq_items = {k: v for k, v in item_counts.items() if v >= min_count}
+    sorted_freq = sorted(freq_items.items(), key=lambda x: (-x[1], x[0]))
+    rank_order = {item: i for i, (item, _) in enumerate(sorted_freq)}
+    
+    # Build FP-Tree to measure structure
+    root = FPNode("root", 0, None)
+    node_count = 0
+    header_table = {item: [count, None] for item, count in freq_items.items()}
+    
+    for tx in transactions_list:
+        filtered_tx = [item for item in tx if item in freq_items]
+        if filtered_tx:
+            filtered_tx.sort(key=lambda x: rank_order[x])
+            curr = root
+            for item in filtered_tx:
+                if item in curr.children:
+                    curr.children[item].count += 1
+                else:
+                    new_node = FPNode(item, 1, curr)
+                    curr.children[item] = new_node
+                    node_count += 1
+                    # Link header
+                    if header_table[item][1] is None:
+                        header_table[item][1] = new_node
+                    else:
+                        ptr = header_table[item][1]
+                        while ptr.node_link is not None:
+                            ptr = ptr.node_link
+                        ptr.node_link = new_node
+                curr = curr.children[item]
+
+    # Calculate tree max depth and root branches
+    def _get_max_depth(node):
+        if not node.children:
+            return 1
+        return 1 + max(_get_max_depth(child) for child in node.children.values())
+        
+    max_tree_depth = _get_max_depth(root) - 1 if root.children else 0
+    root_branches = len(root.children)
+    
+    compression_ratio = ((total_raw_item_tokens - node_count) / total_raw_item_tokens * 100.0) if total_raw_item_tokens > 0 else 0.0
+    
+    # Extract conditional pattern base for the lowest-ranked frequent item
+    sample_cpb = []
+    sample_item = None
+    if sorted_freq:
+        sample_item = sorted_freq[-1][0]
+        curr_ptr = header_table[sample_item][1]
+        while curr_ptr is not None:
+            path = []
+            p = curr_ptr.parent
+            while p is not None and p.item != "root":
+                path.append(p.item)
+                p = p.parent
+            if path:
+                path.reverse()
+                sample_cpb.append({"prefix_path": " -> ".join(path), "path_count": curr_ptr.count})
+            curr_ptr = curr_ptr.node_link
+
+    # Format header table preview for table display
+    header_records = []
+    for item, (count, ptr) in sorted_freq:
+        node_links_count = 0
+        p = ptr
+        while p is not None:
+            node_links_count += 1
+            p = p.node_link
+        header_records.append({
+            "product": item,
+            "support_count": count,
+            "support_pct": round((count / N) * 100.0, 2),
+            "tree_node_occurrences": node_links_count
+        })
+
+    return {
+        "total_transactions": N,
+        "total_raw_item_tokens": total_raw_item_tokens,
+        "frequent_items_count": len(freq_items),
+        "fp_tree_total_nodes": node_count,
+        "compression_ratio_pct": round(compression_ratio, 2),
+        "root_branches_count": root_branches,
+        "max_tree_depth": max_tree_depth,
+        "sample_item_cpb_target": sample_item,
+        "sample_cpb_paths": sample_cpb[:5],
+        "header_table_df": pd.DataFrame(header_records),
+        "spark_partition_strategy": {
+            "partitions": 4,
+            "pass1": "Distributed frequency aggregation via reduceByKey across worker partitions.",
+            "pass2": "Transactions partitioned by hash(item); independent conditional trees mined in parallel without shuffling.",
+            "scalability_advantage": "Eliminates combinatorial candidate generation (Ck) and avoids driver memory exhaustion."
+        }
+    }

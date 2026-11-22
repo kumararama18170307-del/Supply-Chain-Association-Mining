@@ -350,3 +350,215 @@ def plot_runtime_comparison(metrics_apriori: Dict[str, Any], metrics_spark: Dict
     apply_theme(fig, showlegend=False)
     fig.update_traces(texttemplate="%{y:.4f}s", textposition="outside")
     return fig
+
+
+def plot_generalization_scatter(gen_df: pd.DataFrame) -> go.Figure:
+    """
+    Renders Train Confidence vs Test Confidence scatter plot with parity reference line.
+    Points on or above the diagonal indicate strong rule generalization without overfitting.
+    """
+    if gen_df.empty or "train_confidence" not in gen_df.columns:
+        fig = go.Figure()
+        return apply_theme(fig, title="Rule Generalization: Train vs Test Confidence (No Data)")
+
+    fig = px.scatter(
+        gen_df,
+        x="train_confidence",
+        y="test_confidence",
+        color="generalization_status",
+        size="train_support",
+        hover_name="rule_repr",
+        hover_data={
+            "train_confidence": ":.3f",
+            "test_confidence": ":.3f",
+            "confidence_drift": ":.3f",
+            "test_lift": ":.2f",
+            "generalization_status": True
+        },
+        title="Rule Generalization: Train vs Held-Out Test Confidence",
+        labels={
+            "train_confidence": "Training Set Confidence",
+            "test_confidence": "Held-Out Test Set Confidence",
+            "generalization_status": "Status"
+        },
+        color_discrete_map={
+            "Strong Generalizer": THEME_COLORS["accent_green"],
+            "Moderate Generalizer": THEME_COLORS["accent_cyan"],
+            "Overfitted": THEME_COLORS["accent_coral"],
+            "Sub-Independence (Degraded)": THEME_COLORS["accent_yellow"],
+            "Zero Support in Test": THEME_COLORS["text_muted"]
+        }
+    )
+
+    # Add 45-degree parity line (y = x)
+    fig.add_trace(
+        go.Scatter(
+            x=[0, 1],
+            y=[0, 1],
+            mode="lines",
+            line=dict(color="#94A3B8", dash="dash", width=1.5),
+            name="Ideal Parity (y=x)",
+            showlegend=True
+        )
+    )
+
+    apply_theme(fig)
+    fig.update_xaxes(range=[0, 1.05])
+    fig.update_yaxes(range=[0, 1.05])
+    return fig
+
+
+def plot_threshold_sensitivity_curves(sens_df: pd.DataFrame) -> go.Figure:
+    """
+    Renders multi-metric line chart showing Precision, Recall, and F1-Score
+    across varying minimum support and confidence thresholds.
+    """
+    if sens_df.empty:
+        fig = go.Figure()
+        return apply_theme(fig, title="Threshold Sensitivity Curves (No Data)")
+
+    fig = go.Figure()
+
+    # Format label for x-axis combining support and confidence
+    sens_df = sens_df.copy()
+    sens_df["threshold_label"] = sens_df.apply(
+        lambda r: f"Sup:{r['min_support']:.2f}|Conf:{r['min_confidence']:.2f}", axis=1
+    )
+
+    fig.add_trace(go.Scatter(
+        x=sens_df["threshold_label"],
+        y=sens_df["macro_precision"],
+        mode="lines+markers",
+        name="Macro Precision",
+        line=dict(color=THEME_COLORS["accent_green"], width=2.5)
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=sens_df["threshold_label"],
+        y=sens_df["macro_recall"],
+        mode="lines+markers",
+        name="Macro Recall",
+        line=dict(color=THEME_COLORS["accent_cyan"], width=2.5)
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=sens_df["threshold_label"],
+        y=sens_df["macro_f1"],
+        mode="lines+markers",
+        name="Macro F1-Score",
+        line=dict(color=THEME_COLORS["accent_yellow"], width=3)
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=sens_df["threshold_label"],
+        y=sens_df["test_coverage_pct"] / 100.0,
+        mode="lines+markers",
+        name="Coverage Proportion",
+        line=dict(color=THEME_COLORS["accent_coral"], width=2, dash="dot")
+    ))
+
+    apply_theme(
+        fig,
+        title="Rule Quality Trade-Off Curves Across Hyperparameter Thresholds",
+        xaxis_title="Threshold Configuration (Min Support | Min Confidence)",
+        yaxis_title="Metric Value (0.0 - 1.0)"
+    )
+    fig.update_xaxes(tickangle=-45)
+    fig.update_yaxes(range=[0, 1.05])
+    return fig
+
+
+def plot_rule_drift_histogram(gen_df: pd.DataFrame) -> go.Figure:
+    """
+    Renders histogram of rule confidence drift (Test Confidence - Train Confidence).
+    """
+    if gen_df.empty or "confidence_drift" not in gen_df.columns:
+        fig = go.Figure()
+        return apply_theme(fig, title="Rule Confidence Drift Distribution (No Data)")
+
+    fig = px.histogram(
+        gen_df,
+        x="confidence_drift",
+        nbins=20,
+        title="Distribution of Generalization Confidence Drift (Δ Confidence)",
+        labels={"confidence_drift": "Confidence Drift (Test Conf - Train Conf)"},
+        color_discrete_sequence=[THEME_COLORS["accent_blue"]]
+    )
+
+    # Vertical zero-drift line
+    fig.add_vline(x=0.0, line_dash="dash", line_color=THEME_COLORS["accent_green"], annotation_text="Zero Drift (Perfect Stability)")
+
+    apply_theme(fig)
+    return fig
+
+
+def plot_candidate_levels_bar(levels_df: pd.DataFrame) -> go.Figure:
+    """
+    Renders grouped bar chart showing Apriori level-by-level candidate generation,
+    pruning by downward closure, and discovered frequent itemsets.
+    """
+    if levels_df.empty or "level_name" not in levels_df.columns:
+        fig = go.Figure()
+        return apply_theme(fig, title="Apriori Level Candidate Pruning (No Data)")
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=levels_df["level_name"],
+        y=levels_df["theoretical_combinatorial"],
+        name="Combinatorial Space (Without Apriori)",
+        marker_color="#334155"
+    ))
+
+    fig.add_trace(go.Bar(
+        x=levels_df["level_name"],
+        y=levels_df["scanned_against_database"],
+        name="Candidates Scanned (Ck)",
+        marker_color=THEME_COLORS["accent_yellow"]
+    ))
+
+    fig.add_trace(go.Bar(
+        x=levels_df["level_name"],
+        y=levels_df["frequent_itemsets_found"],
+        name="Frequent Itemsets Found (Lk)",
+        marker_color=THEME_COLORS["accent_green"]
+    ))
+
+    apply_theme(
+        fig,
+        title="Apriori Candidate Generation & Downward-Closure Pruning per Level",
+        barmode="group",
+        yaxis_type="log",
+        yaxis_title="Count (Log Scale)"
+    )
+    return fig
+
+
+def plot_fptree_compression(stats_dict: Dict[str, Any]) -> go.Figure:
+    """
+    Renders horizontal comparison illustrating FP-Tree memory compression vs raw transaction items.
+    """
+    raw_tokens = stats_dict.get("total_raw_item_tokens", 0)
+    tree_nodes = stats_dict.get("fp_tree_total_nodes", 0)
+    
+    comp_df = pd.DataFrame([
+        {"Data Structure": "Raw Transaction Item Tokens", "Elements": raw_tokens},
+        {"Data Structure": "FP-Tree Compressed Nodes", "Elements": tree_nodes}
+    ])
+
+    fig = px.bar(
+        comp_df,
+        x="Elements",
+        y="Data Structure",
+        orientation="h",
+        title=f"FP-Tree Prefix Sharing Compression: {stats_dict.get('compression_ratio_pct', 0)}% Savings",
+        color="Data Structure",
+        color_discrete_map={
+            "Raw Transaction Item Tokens": THEME_COLORS["accent_coral"],
+            "FP-Tree Compressed Nodes": THEME_COLORS["accent_green"]
+        },
+        text="Elements"
+    )
+    apply_theme(fig, showlegend=False)
+    fig.update_traces(texttemplate="%{x:,} elements", textposition="outside")
+    return fig
