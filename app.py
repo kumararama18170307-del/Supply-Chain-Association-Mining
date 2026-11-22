@@ -293,6 +293,30 @@ def ensure_spark_executed(force_engine=None):
         st.session_state.spark_computed = True
 
 
+def ensure_accuracy_evaluated():
+    """Executes out-of-sample accuracy evaluation if not yet cached."""
+    if not st.session_state.get("acc_evaluated", False):
+        train_basket, test_basket = train_test_split_baskets(
+            basket_df=st.session_state.basket_matrix,
+            test_size=st.session_state.acc_test_size,
+            random_state=st.session_state.acc_random_seed
+        )
+        _, train_rules, _ = run_apriori_mining(
+            basket_df=train_basket,
+            min_support=st.session_state.min_support,
+            min_confidence=st.session_state.min_confidence,
+            min_lift=st.session_state.min_lift,
+            max_len=st.session_state.max_len
+        )
+        gen_df, gen_sum = evaluate_rule_generalization(train_rules, test_basket)
+        pred_df, pred_sum = evaluate_predictive_accuracy(train_rules, test_basket)
+        st.session_state.acc_gen_df = gen_df
+        st.session_state.acc_gen_summary = gen_sum
+        st.session_state.acc_pred_df = pred_df
+        st.session_state.acc_pred_summary = pred_sum
+        st.session_state.acc_evaluated = True
+
+
 # Sidebar Navigation & Mining Thresholds
 PAGES = [
     "Dashboard",
@@ -747,7 +771,7 @@ elif selected_page == "Spark FP-Growth":
             st.warning("No frequent patterns found.")
         else:
             display_s_freq = s_freq[["itemset_str", "length", "support"]].copy()
-            display_s_freq["support_pct"] = display_freq["support"].apply(lambda v: f"{v*100:.2f}%") if "support" in display_s_freq else display_s_freq["support"]
+            display_s_freq["support_pct"] = display_s_freq["support"].apply(lambda v: f"{v*100:.2f}%") if "support" in display_s_freq else display_s_freq["support"]
             st.dataframe(display_s_freq, use_container_width=True)
 
     with tab_sp2:
@@ -1154,6 +1178,7 @@ elif selected_page == "Supply Chain Insights":
 # ==========================================
 elif selected_page == "Reports":
     ensure_apriori_executed()
+    ensure_accuracy_evaluated()
     st.title("📑 Analytical Reports & Export Center")
     st.markdown("Generate executive reports, analytical findings summaries, and download clean data assets.")
 
